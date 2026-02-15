@@ -3,11 +3,12 @@ use axum::{
         ws::{Message, WebSocket},
         Path, Query, State, WebSocketUpgrade,
     },
-    http::{HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{any, get},
     Router,
 };
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -23,21 +24,24 @@ pub struct LimitQuery {
     key: Option<String>,
 }
 
-fn ip_from_headers(h: &HeaderMap) -> String {
+#[inline]
+fn ip_from_headers(h: &HeaderMap) -> &str {
     if let Some(v) = h.get("x-forwarded-for") {
         if let Ok(s) = v.to_str() {
             if let Some(f) = s.split(',').next() {
-                return f.trim().to_string();
+                return f.trim();
             }
         }
     }
     if let Some(v) = h.get("x-real-ip") {
         if let Ok(s) = v.to_str() {
-            return s.trim().to_string();
+            return s.trim();
         }
     }
-    "unknown".to_string()
+    "unknown"
 }
+
+static CACHE_HEADERS: &[(header::HeaderName, &str)] = &[];
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -49,8 +53,18 @@ pub fn routes() -> Router<Arc<AppState>> {
         .fallback(any(catch_all))
 }
 
-async fn index() -> Html<&'static str> {
-    Html(HTML_TEMPLATE)
+async fn index() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300, stale-while-revalidate=60")),
+            (header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff")),
+            (header::HeaderName::from_static("referrer-policy"), HeaderValue::from_static("strict-origin-when-cross-origin")),
+        ],
+        HTML_TEMPLATE,
+    )
+        .into_response()
 }
 
 async fn health() -> &'static str {
@@ -58,10 +72,14 @@ async fn health() -> &'static str {
 }
 
 async fn get_state(State(state): State<Arc<AppState>>) -> Response {
+    let data = state.get_cached_state();
     (
         StatusCode::OK,
-        [("content-type", "application/json")],
-        state.get_cached_state(),
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache, must-revalidate")),
+        ],
+        data,
     )
         .into_response()
 }
@@ -78,8 +96,9 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>) {
 
     let (mut sender, mut receiver) = socket.split();
 
+    let initial = state.get_cached_state();
     if sender
-        .send(Message::Binary(state.get_cached_state().to_vec().into()))
+        .send(Message::Binary(initial.to_vec().into()))
         .await
         .is_err()
     {
@@ -135,14 +154,14 @@ async fn set_limit(
 ) -> Response {
     let ip = ip_from_headers(&headers);
 
-    if state.is_ip_blocked(&ip) {
+    if state.is_ip_blocked(ip) {
         return (StatusCode::TOO_MANY_REQUESTS, "IP diblokir sementara").into_response();
     }
 
     let key = match query.key {
-        Some(k) if !k.is_empty() => k,
+        Some(ref k) if !k.is_empty() => k.as_str(),
         _ => {
-            state.record_failed_attempt(&ip, 2);
+            state.record_failed_attempt(ip, 2);
             return (StatusCode::BAD_REQUEST, "Parameter key diperlukan").into_response();
         }
     };
@@ -150,14 +169,14 @@ async fn set_limit(
     let kb = key.as_bytes();
     let sb = SECRET_KEY.as_bytes();
     if kb.len() != sb.len() || kb.ct_eq(sb).unwrap_u8() != 1 {
-        state.record_failed_attempt(&ip, 1);
+        state.record_failed_attempt(ip, 1);
         return (StatusCode::FORBIDDEN, "Akses ditolak").into_response();
     }
 
     let int_value: i64 = match value.parse() {
         Ok(v) => v,
         Err(_) => {
-            state.record_failed_attempt(&ip, 1);
+            state.record_failed_attempt(ip, 1);
             return (StatusCode::BAD_REQUEST, "Nilai harus angka").into_response();
         }
     };
@@ -194,17 +213,17 @@ async fn catch_all(State(state): State<Arc<AppState>>, headers: HeaderMap, uri: 
     let ip = ip_from_headers(&headers);
     let path = uri.path().to_lowercase();
 
-    if state.is_ip_blocked(&ip) {
+    if state.is_ip_blocked(ip) {
         return (StatusCode::TOO_MANY_REQUESTS, "IP diblokir sementara").into_response();
     }
 
     if !path.starts_with("/aturt")
         && (path.contains("admin") || path.contains("config"))
     {
-        state.record_failed_attempt(&ip, 2);
+        state.record_failed_attempt(ip, 2);
         return (StatusCode::FORBIDDEN, "Akses ditolak").into_response();
     }
 
-    state.record_failed_attempt(&ip, 1);
+    state.record_failed_attempt(ip, 1);
     (StatusCode::NOT_FOUND, "Halaman tidak ditemukan").into_response()
 }
