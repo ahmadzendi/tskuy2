@@ -1,26 +1,31 @@
-FROM rust:1.87-slim-bookworm AS builder
+# ============ STAGE 1: Build ============
+FROM rust:1.87-alpine AS builder
 
-RUN apt-get update && apt-get install -y \
-    pkg-config libssl-dev ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig \
+    openssl-dev \
+    openssl-libs-static \
+    perl \
+    make
 
 WORKDIR /app
+
+# Cache dependencies layer
 COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src && echo "fn main(){}" > src/main.rs && \
+    cargo build --release 2>/dev/null || true && \
+    rm -rf src
 
-RUN mkdir src && echo "fn main(){}" > src/main.rs
-RUN cargo build --release 2>/dev/null || true
-RUN rm -rf src
-
+# Build actual app
 COPY src/ src/
-RUN touch src/main.rs
-RUN cargo build --release
+RUN touch src/main.rs && cargo build --release
 
-FROM debian:bookworm-slim
+# ============ STAGE 2: Runtime (minimal) ============
+FROM alpine:3.20
 
-RUN apt-get update && apt-get install -y \
-    ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r app && useradd -r -g app app
+RUN apk add --no-cache ca-certificates && \
+    addgroup -S app && adduser -S app -G app
 
 COPY --from=builder /app/target/release/gold-monitor /usr/local/bin/gold-monitor
 
