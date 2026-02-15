@@ -32,18 +32,24 @@ async fn main() {
 
     let state = Arc::new(AppState::new());
 
-    let s = state.clone();
-    tokio::spawn(async move { treasury::treasury_ws_loop(s).await });
+    // Background tasks — spawn semua sekaligus
+    let s1 = state.clone();
+    let s2 = state.clone();
+    let s3 = state.clone();
 
-    let s = state.clone();
-    tokio::spawn(async move { usd_idr::usd_idr_loop(s).await });
+    tokio::spawn(async move { treasury::treasury_ws_loop(s1).await });
+    tokio::spawn(async move { usd_idr::usd_idr_loop(s2).await });
+    tokio::spawn(async move { ws_manager::heartbeat_loop(s3).await });
 
-    let s = state.clone();
-    tokio::spawn(async move { ws_manager::heartbeat_loop(s).await });
+    // Compression: gzip + brotli + deflate
+    let compression = CompressionLayer::new()
+        .gzip(true)
+        .br(true)
+        .deflate(true);
 
     let app = Router::new()
         .merge(handlers::routes())
-        .layer(CompressionLayer::new().gzip(true).br(true).deflate(true))
+        .layer(compression)
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             security::security_middleware,
@@ -59,7 +65,7 @@ async fn main() {
         .await
         .unwrap();
 
-    info!("Server starting on 0.0.0.0:{}", port);
+    info!("⚡ Server ready on 0.0.0.0:{}", port);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
