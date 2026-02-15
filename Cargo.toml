@@ -25,6 +25,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 subtle = "2"
 mimalloc = { version = "0.1", default-features = false }
+itoa = "1"
+ryu = "1"
 
 [profile.release]
 opt-level = 3
@@ -32,3 +34,6 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+overflow-checks = false
+debug = false
+incremental = false
